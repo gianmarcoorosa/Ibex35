@@ -1,0 +1,639 @@
+---
+title: "Untitled"
+output: word_document
+date: "2024-04-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In questo progetto viene analizzato l'andamento dell'indice IBEX 35 del mercato azionario spagnolo, con un focus sulla modellizzazione della volatilità. Attraverso analisi esplorative dei dati, stima di autocorrelazioni (ACF, PACF) e la presenza di asimmetria, vengono implementati e confrontati diversi modelli GARCH, tra cui EGARCH e GJR-GARCH. Le performance predittive dei modelli sono state valutate usando il test di Newey-West per fornire previsioni robuste della volatilità futura.
+
+
+
+
+  NOTA: alcuni grafici, oggetti e funzioni sono riportati in forma di commento (#funzione..) per motivi di sintesi
+
+  
+
+## Caricamento dati e fuznioni utili
+
+
+```{r}
+rm(list=ls())
+library(quantmod)
+library(astsa)
+library(readxl)
+library(tidyverse)
+library(fImport)
+library(fBasics)
+library(rugarch)
+library(roll)
+library(distr)
+library(fBasics)
+library(xts)
+
+# funzione test LM-Arch
+lm.arch= function(x){
+  x2=x^2
+  x2L1=lag(x2,k= 1)
+  x2L2=lag(x2,k= 2)
+  x2L3=lag(x2,k= 3)
+  mod1=lm(x2~x2L1)
+  out1=summary(mod1)
+  stat.test= out1$r.squared*(T-2)
+  print("il p-value con un lag è: ")
+  print( pchisq(stat.test, 1, lower.tail=F))
+  mod2=lm(x2~x2L1+x2L2)
+  out2=summary(mod2)
+  stat.test= out2$r.squared*(T-2)
+  print("il p-value con due lag è: ")
+  print( pchisq(stat.test, 2, lower.tail=F))
+  mod3=lm(x2~x2L1+x2L2+x2L3)
+  out3=summary(mod3)
+  stat.test= out3$r.squared*(T-2)
+  print("il p-value con tre lag è: ")
+  print( pchisq( stat.test,  3, lower.tail=F))
+}
+
+# test LB
+lb.test= function(x){
+  lb=Box.test(x, (1:15))
+  print(lb$p.value)
+}
+
+# ricavare BIC
+bic_garch=function(fitted_garch){
+  LL=fitted_garch@fit$LLH
+  P=length(fitted_garch@fit$coef)
+  N=length(fitted_garch@fit$fitted.values)
+  (P*log(N))-(2*LL)
+}
+```
+
+##Definizione delle principali specificazioni GARCH
+
+```{r}
+spec0= ugarchspec(variance.model=list(model='sGARCH', garchOrder=c(1,1)), 
+                   mean.model=list(armaOrder=c(1,1), include.mean=T), distribution.model = 'norm')
+spec1= ugarchspec(variance.model=list(model='sGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=T), distribution.model = 'std')
+spec2= ugarchspec(variance.model=list(model='sGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=T), distribution.model = 'ged')
+spec3<-ugarchspec(variance.model=list(model="eGARCH",garchOrder=c(1,1)),
+                  mean.model=list(armaOrder=c(1,1),include.mean=TRUE), 
+                  distribution.model="norm")
+spec4<-ugarchspec(variance.model=list(model="eGARCH",garchOrder=c(1,1)),
+                  mean.model=list(armaOrder=c(1,1),include.mean=TRUE), 
+                  distribution.model="std")
+spec5 = ugarchspec(variance.model=list(model='eGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=TRUE),
+                  distribution.model = 'ged')
+spec6= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=T), 
+                  distribution.model = 'norm')
+spec7= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=T), distribution.model = 'std')
+spec8= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=T),
+                  distribution.model = 'ged')
+```
+
+
+
+##Caricamento dei dati
+
+```{r}
+path='C:/Users/Gianmarco/Downloads/G10/G10/homework2.xlsx'
+data= read_xlsx(path)
+#head(data)
+T=nrow(data)
+n=ncol(data)
+p=log(data[, 2:n])
+data$Date= as.Date(data$Date)
+r= p[2:T, ]- p[1:T-1, ]
+r=xts(r, order.by=data$Date[-1], frequency='daily')
+r=r*100
+train_size=1307
+ibex.train=r$`IBEX 35 - TOT RETURN IND`[1:train_size]
+ago.train=r$`AGORA MATERIALS R - TOT RETURN IND`[1:train_size]
+
+```
+
+##Analisi esplorative
+```{r}
+plot(r$`IBEX 35 - TOT RETURN IND`, main='IBEX log-returns', type='l')
+plot((r$`IBEX 35 - TOT RETURN IND`)^2, type='l', main='IBEX squared log-returns')
+min(r$`IBEX 35 - TOT RETURN IND`)
+max(r$`IBEX 35 - TOT RETURN IND`)
+mean(r$`IBEX 35 - TOT RETURN IND`)
+
+par(mfrow=c(2,2))
+acf(coredata(r$`IBEX 35 - TOT RETURN IND`), main='ACF IBEX returns')
+pacf(coredata(r$`IBEX 35 - TOT RETURN IND`), main='PACF IBEX returns')
+acf(coredata(abs(r$`IBEX 35 - TOT RETURN IND`)), main='ACF abs IBEX returns')
+pacf(coredata(abs(r$`IBEX 35 - TOT RETURN IND`)), main='PACF abs IBEX returns')
+#acf(coredata((r$`IBEX 35 - TOT RETURN IND`)^2), main='ACF squared IBEX returns')
+#pacf(coredata((r$`IBEX 35 - TOT RETURN IND`)^2), main='PACF squared IBEX returns')
+
+
+lb.test(r$`IBEX 35 - TOT RETURN IND`)
+lb.test(abs(r$`IBEX 35 - TOT RETURN IND`))
+lb.test((r$`IBEX 35 - TOT RETURN IND`)^2)
+
+```
+
+Il test di incorrelazione  porta ad accettare l'assenza di correlazione nei ritardi nella serie dei rendimenti. Nelle serie dei rendimenti al quadrato e rendimenti in valore assoluto l'ipotesi viene rifiutata, come prevedibile dai risultati presenti in letteratura.
+
+```{r}
+bs=basicStats(r$`IBEX 35 - TOT RETURN IND`)
+bs
+shapiro.test(coredata(r$`IBEX 35 - TOT RETURN IND`))
+xfit=seq(min(r$`IBEX 35 - TOT RETURN IND`),max(r$`IBEX 35 - TOT RETURN IND`),length=40) 
+yfit=dnorm(xfit,mean=mean(r$`IBEX 35 - TOT RETURN IND`),sd=sd(r$`IBEX 35 - TOT RETURN IND`)) 
+hist(r$`IBEX 35 - TOT RETURN IND`,breaks=100,freq=F,main="Rendimenti IBEX",xlab="")
+lines(xfit , yfit , col = 2, lwd = 2)
+```
+I valori dell'output si distaccano dai valori di una distribuzione Normale Standard. Si conferma il risultato teorico sulla distribuzione dei rendimenti.
+Procediamo ad un test per la presenza di effetti GARCH sulla serie dei rendimenti
+
+```{r}
+lm.arch(r$`IBEX 35 - TOT RETURN IND`)
+```
+
+Il test porta a rifiutare, per tutti i ritardi considerati, l'ipotesi nulla. Si deriva che la serie presenta effetti ARCH. Si procede in primo luogo, nelle righe seguenti, con la stima di un modello GARCH(1,1) con distribuzione scelta Normale. 
+
+```{r}
+ibexfit0=ugarchfit(spec0, ibex.train)
+ibexfit0
+
+par(mfrow=c(1,2))
+plot(ibexfit0, which=9)
+plot(ibexfit0, which=8)
+plot(ibexfit0, which=11)
+plot(ibexfit0, which=12)
+signbias(ibexfit0)
+par(mfrow=c(1,1))
+plot(ibexfit0, which=3)
+```
+
+Il modello stimato risulta avere significativi anche i termini relativi ad una dinamica ARMA. Sono stati riportati quattro grafici, ritenuti essere utili. Il qqplot presenta un adattamento non ottimale, discostandosi particolarmente nelle code. Il test per la presenza di asimmetria evidenzia una leggera presenza in corrispondenza del Joint effect. 
+Procediamo con alcuni test sul modello, anche se la distribuzione non e' ottimale.
+
+```{r}
+res0=residuals(ibexfit0, standardize=T)
+par(mfrow=c(2,1))
+acf(res0)
+pacf(res0)
+par(mfrow=c(1,1))
+plot(res0,main="Residui standardizzati")
+lm.arch(res0)
+lb.test(res0)
+```
+I risultati dei test portano ad accettare le ipotesi nulle. Si nota pero' che la distribuzione scelta non e' corretta: il modello e' misspecificato, e questi test perdono di valore.
+Si procede con la stima di modelli con distribuzioni differenti. Vengono introdotti anche modelli che supportano la presenza di assimmetria.
+
+
+```{r}
+ibexfit1=ugarchfit(spec1, ibex.train)
+#ibexfit1
+spec1.1= ugarchspec(variance.model=list(model='sGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(0,0), include.mean=T), distribution.model = 'std')
+ibexfit1.1=ugarchfit(spec1.1, ibex.train)
+ibexfit1.1
+#infocriteria(ibexfit1.1)
+plot(ibexfit1.1, which=9)
+#plot(ibexfit1.1, which=8)
+#plot(ibexfit1.1, which=3)
+
+
+ibexfit2=ugarchfit(spec2, ibex.train)
+#ibexfit2
+#infocriteria(ibexfit2)
+#plot(ibexfit2, which=9)
+#plot(ibexfit2, which=8)
+#plot(ibexfit2, which=3)
+
+
+#ibexfit3=ugarchfit(spec3, ibex.train)
+#ibexfit3
+spec3.1= ugarchspec(variance.model=list(model='eGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'norm')
+ibexfit3.1=ugarchfit(spec3.1, ibex.train)
+ibexfit3.1
+#infocriteria(ibexfit3.1)
+plot(ibexfit3.1, which=9)
+#plot(ibexfit3.1, which=8)
+#plot(ibexfit3.1, which=3)
+
+
+#ibexfit4=ugarchfit(spec4, ibex.train)
+#ibexfit4
+spec4.1= ugarchspec(variance.model=list(model='eGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'std')
+ibexfit4.1=ugarchfit(spec4.1, ibex.train)
+ibexfit4.1
+#infocriteria(ibexfit4.1)
+plot(ibexfit4.1, which=9)
+#plot(ibexfit4.1, which=8)
+#plot(ibexfit4.1, which=3)
+
+
+#ibexfit5=ugarchfit(spec5, ibex.train)
+#ibexfit5
+spec5.1= ugarchspec(variance.model=list(model='eGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'ged')
+ibexfit5.1=ugarchfit(spec5.1, ibex.train)
+ibexfit5.1
+#infocriteria(ibexfit5.1)
+plot(ibexfit5.1, which=9)
+#plot(ibexfit5.1, which=8)
+#plot(ibexfit5.1, which=3)
+
+
+#ibexfit6=ugarchfit(spec6, ibex.train)
+#ibexfit6
+spec6.1= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'norm')
+ibexfit6.1=ugarchfit(spec6.1, ibex.train)
+ibexfit6.1
+#infocriteria(ibexfit6.1)
+plot(ibexfit6.1, which=9)
+#plot(ibexfit6.1, which=8)
+#plot(ibexfit6.1, which=3)
+
+
+#ibexfit7=ugarchfit(spec7, ibex.train)
+#ibexfit7
+spec7.1= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'std')
+ibexfit7.1=ugarchfit(spec7.1, ibex.train)
+ibexfit7.1
+#infocriteria(ibexfit7.1)
+plot(ibexfit7.1, which=9)
+#plot(ibexfit7.1, which=8)
+#plot(ibexfit7.1, which=3)
+
+
+#ibexfit8=ugarchfit(spec8, ibex.train)
+#ibexfit8
+spec8.1= ugarchspec(variance.model=list(model='gjrGARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model = 'ged')
+ibexfit8.1=ugarchfit(spec8.1, ibex.train)
+ibexfit8.1
+#infocriteria(ibexfit8.1)
+plot(ibexfit8.1, which=9)
+#plot(ibexfit8.1, which=8)
+#plot(ibexfit8.1, which=3)
+```
+Si procede con l'analisi dei modelli stimati, in particolare nei residui
+
+```{r}
+res1= residuals(ibexfit1.1, standardize=T)
+res2= residuals(ibexfit2, standardize=T)
+res3= residuals(ibexfit3.1, standardize=T)
+res4= residuals(ibexfit4.1, standardize=T)
+res5= residuals(ibexfit5.1, standardize=T)
+res6= residuals(ibexfit6.1, standardize=T)
+res7= residuals(ibexfit7.1, standardize=T)
+res8= residuals(ibexfit8.1, standardize=T)
+
+print('LB test per GARCH(1,1) con distribuzione std:')
+lb.test(res1)
+print('LB test per GARCH(1,1) con distribuzione ged:')
+lb.test(res2)
+print('LB test per eGARCH(1,1) con distribuzione Normale:')
+lb.test(res3)
+print('LB test per eGARCH(1,1) con distribuzione std:')
+lb.test(res4)
+print('LB test per eGARCH(1,1) con distribuzione ged:')
+lb.test(res5)
+print('LB test per gjrGARCH(1,1) con distribuzione Normale:')
+lb.test(res6)
+print('LB test per gjrGARCH(1,1) con distribuzione std:')
+lb.test(res7)
+print('LB test per gjrGARCH(1,1) con distribuzione ged:')
+lb.test(res8)
+
+par(mfrow=c(1,2))
+acf(res1, main='ACF GARCH residuals')
+pacf(res1, main='PACF GARCH residuals')
+#acf(res2)
+#pacf(res2)
+#acf(res3)
+#pacf(res3)
+acf(res4, main='ACF eGARCH residuals')
+pacf(res4, main='PACF eGARCH residuals')
+#acf(res5)
+#pacf(res5)
+#acf(res6)
+#pacf(res6)
+acf(res7, main='ACF gjr-GARCH residuals')
+pacf(res7, main='PACF gjr-GARCH residuals')
+#acf(res8)
+#pacf(res8)
+
+print('Test LM ARCH sui residui del modello GARCH(1,1) con distribuzione std')
+lm.arch(res1)
+print('Test LM ARCH sui residui del modello GARCH(1,1) con distribuzione ged')
+lm.arch(res2)
+print('Test LM ARCH sui residui del modello eGARCH(1,1) con distribuzione Normale')
+lm.arch(res3)
+print('Test LM ARCH sui residui del modello eGARCH(1,1) con distribuzione std')
+lm.arch(res4)
+print('Test LM ARCH sui residui del modello eGARCH(1,1) con distribuzione ged')
+lm.arch(res5)
+print('Test LM ARCH sui residui del modello gjrGARCH(1,1) con distribuzione Normale')
+lm.arch(res6)
+print('Test LM ARCH sui residui del modello gjrGARCH(1,1) con distribuzione std')
+lm.arch(res7)
+print('Test LM ARCH sui residui del modello gjrGARCH(1,1) con distribuzione ged')
+lm.arch(res8)
+```
+
+Gli autocorrelogrammi dei residui mostrano un andamento soddisfaciente.
+
+
+
+Si riportano i grafici delle NewsImpactCurves per modelli con innovazioni t di Student
+```{r}
+# NIC garch standard
+plot(ibexfit1.1, which=12)
+
+# NIC e-garch
+plot(ibexfit4.1, which=12)
+
+#NIC GJR-garch
+plot(ibexfit7.1, which=12)
+```
+
+L'analisi grafica riporta l'effetto asimmetria. Ricordando che l'eGARCH presenta la possibilita' di effetto leverage, questo non sembra essere presente; la NIC relativa al modello comunque ha il ramo destro che cresce molto lentamente.
+
+Si procede con l'analisi dei criteri informativi. Riportiamo in BIC.
+```{r}
+# per altri criteri vedere righe precedenti
+bic0=bic_garch(ibexfit0)
+bic1=bic_garch(ibexfit1.1)
+bic2=bic_garch(ibexfit2)
+bic3=bic_garch(ibexfit3.1)
+bic4=bic_garch(ibexfit4.1)
+bic5=bic_garch(ibexfit5.1)
+bic6=bic_garch(ibexfit6.1)
+bic7=bic_garch(ibexfit7.1)
+bic8=bic_garch(ibexfit8.1)
+
+bic=cbind(bic0,bic1,bic2,bic3,bic4,bic5,bic6,bic7,bic8)
+colnames(bic)=c('sGARCH norm','sGARCH std','sGARCH ged',
+                'eGARCH norm','eGARCH std','eGARCH ged',
+                'gjrGARCH norm','gjrGARCH std','gjrGARCH ged')
+bic
+which.min(bic[1,])
+```
+
+Seguendo il criterio informativo di Bayes, il modello preferibile e' l'eGARCH con distribuzione scelta t di Student. Si nota che la distribuzione t di Student e' la distribuzione che meglio perfoma quando fittata al modello.
+
+
+Procediamo ora al punto 4, analizzando le previsioni statiche per l'ultimo set di dati
+
+```{r}
+ret1=ibex.train-mean(ibex.train)
+for0=ugarchroll(spec0,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for1=ugarchroll(spec1.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for2=ugarchroll(spec2,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for3=ugarchroll(spec3.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for4=ugarchroll(spec4.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for5=ugarchroll(spec5.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for6=ugarchroll(spec6.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for7=ugarchroll(spec7.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+for8=ugarchroll(spec8.1,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+spec9=ugarchspec( variance.model=list(model='apARCH', garchOrder=c(1,1)), 
+                  mean.model=list(armaOrder=c(1,1), include.mean=F), distribution.model='std')
+for9=ugarchroll(spec9,data=ret1,forecast.length=252,refit.every=15,window.size=1000,refit.window="moving")
+
+for0d=as.data.frame(for0) 
+for1d=as.data.frame(for1)
+for2d=as.data.frame(for2)
+for3d=as.data.frame(for3) 
+for4d=as.data.frame(for4)
+for5d=as.data.frame(for5)
+for6d=as.data.frame(for6) 
+for7d=as.data.frame(for7)
+for8d=as.data.frame(for8)
+for9d=as.data.frame(for9)
+
+s0f=for0d$Sigma
+s1f=for1d$Sigma
+s2f=for2d$Sigma
+s3f=for3d$Sigma
+s4f=for4d$Sigma
+s5f=for5d$Sigma
+s6f=for6d$Sigma
+s7f=for7d$Sigma
+s8f=for8d$Sigma
+s9f=for9d$Sigma
+fall=cbind(s0f,s1f,s2f, s3f, s4f,s5f,s6f,s7f,s8f)
+matplot(fall,type=c("b"),pch=1)
+
+# scegliendo i 3 modelli con distribuzioni std
+fall2=cbind(s1f, s4f,s7f)
+matplot(fall2,type=c("b"),pch=1)
+
+# le funzioni di pedita sono calcolate rispetto ai rendimenti realmente osservati
+rf=tail(abs(r$`IBEX 35 - TOT RETURN IND`-mean(r$`IBEX 35 - TOT RETURN IND`)), 252)
+
+# Funzioni di perdita
+l0=(s0f^2-rf^2)
+l1=(s1f^2-rf^2)
+l2=(s2f^2-rf^2)
+l3=(s3f^2-rf^2)
+l4=(s4f^2-rf^2)
+l5=(s5f^2-rf^2)
+l6=(s6f^2-rf^2)
+l7=(s7f^2-rf^2)
+l8=(s8f^2-rf^2)
+l9=(s9f^2-rf^2)
+# Differenziali tra le funzioni di perdita
+d01=l0-l1
+d02=l0-l2
+d03=l0-l3
+d04=l0-l4
+d05=l0-l5
+d06=l0-l6
+d07=l0-l7
+d08=l0-l8
+d09=l0-l9
+
+d12=l1-l2
+d13=l1-l3
+d14=l1-l4
+d15=l1-l5
+d16=l1-l6
+d17=l1-l7
+d18=l1-l8
+d19=l1-l9
+
+d23=l2-l3
+d24=l2-l4
+d25=l2-l5
+d26=l2-l6
+d27=l2-l7
+d28=l2-l8
+d29=l2-l9
+
+d34=l3-l4
+d35=l3-l5
+d36=l3-l6
+d37=l3-l7
+d38=l3-l8
+d39=l3-l9
+
+d45=l4-l5
+d46=l4-l6
+d47=l4-l7
+d48=l4-l8
+d49=l4-l9
+
+d56=l5-l6
+d57=l5-l7
+d58=l5-l8
+d59=l5-l9
+
+d67=l6-l7
+d68=l6-l8
+d69=l6-l9
+
+d78=l7-l8
+d79=l7-l9
+
+d89=l8-l9
+
+```
+
+Matrice dei test DM
+
+```{r}
+
+library(sandwich)
+m=floor(0.75*((NROW(rf))^(1/3)))
+x1=as.vector(matrix(1,nrow=NROW(rf)))
+V01=NeweyWest(lm(d01~x1-1),lag=m,prewhite=0)
+V02=NeweyWest(lm(d02~x1-1),lag=m,prewhite=0)
+V03=NeweyWest(lm(d03~x1-1),lag=m,prewhite=0)
+V04=NeweyWest(lm(d04~x1-1),lag=m,prewhite=0)
+V05=NeweyWest(lm(d05~x1-1),lag=m,prewhite=0)
+V06=NeweyWest(lm(d06~x1-1),lag=m,prewhite=0)
+V07=NeweyWest(lm(d07~x1-1),lag=m,prewhite=0)
+V08=NeweyWest(lm(d08~x1-1),lag=m,prewhite=0)
+V09=NeweyWest(lm(d09~x1-1),lag=m,prewhite=0)
+
+V12=NeweyWest(lm(d12~x1-1),lag=m,prewhite=0)
+V13=NeweyWest(lm(d13~x1-1),lag=m,prewhite=0)
+V14=NeweyWest(lm(d14~x1-1),lag=m,prewhite=0)
+V15=NeweyWest(lm(d15~x1-1),lag=m,prewhite=0)
+V16=NeweyWest(lm(d16~x1-1),lag=m,prewhite=0)
+V17=NeweyWest(lm(d17~x1-1),lag=m,prewhite=0)
+V18=NeweyWest(lm(d18~x1-1),lag=m,prewhite=0)
+V19=NeweyWest(lm(d19~x1-1),lag=m,prewhite=0)
+
+V23=NeweyWest(lm(d23~x1-1),lag=m,prewhite=0)
+V24=NeweyWest(lm(d24~x1-1),lag=m,prewhite=0)
+V25=NeweyWest(lm(d25~x1-1),lag=m,prewhite=0)
+V26=NeweyWest(lm(d26~x1-1),lag=m,prewhite=0)
+V27=NeweyWest(lm(d27~x1-1),lag=m,prewhite=0)
+V28=NeweyWest(lm(d28~x1-1),lag=m,prewhite=0)
+V29=NeweyWest(lm(d29~x1-1),lag=m,prewhite=0)
+
+V34=NeweyWest(lm(d34~x1-1),lag=m,prewhite=0)
+V35=NeweyWest(lm(d35~x1-1),lag=m,prewhite=0)
+V36=NeweyWest(lm(d36~x1-1),lag=m,prewhite=0)
+V37=NeweyWest(lm(d37~x1-1),lag=m,prewhite=0)
+V38=NeweyWest(lm(d38~x1-1),lag=m,prewhite=0)
+V39=NeweyWest(lm(d39~x1-1),lag=m,prewhite=0)
+
+V45=NeweyWest(lm(d45~x1-1),lag=m,prewhite=0)
+V46=NeweyWest(lm(d46~x1-1),lag=m,prewhite=0)
+V47=NeweyWest(lm(d47~x1-1),lag=m,prewhite=0)
+V48=NeweyWest(lm(d48~x1-1),lag=m,prewhite=0)
+V49=NeweyWest(lm(d49~x1-1),lag=m,prewhite=0)
+
+V56=NeweyWest(lm(d56~x1-1),lag=m,prewhite=0)
+V57=NeweyWest(lm(d57~x1-1),lag=m,prewhite=0)
+V58=NeweyWest(lm(d58~x1-1),lag=m,prewhite=0)
+V59=NeweyWest(lm(d59~x1-1),lag=m,prewhite=0)
+
+V67=NeweyWest(lm(d67~x1-1),lag=m,prewhite=0)
+V68=NeweyWest(lm(d68~x1-1),lag=m,prewhite=0)
+V69=NeweyWest(lm(d69~x1-1),lag=m,prewhite=0)
+
+V78=NeweyWest(lm(d78~x1-1),lag=m,prewhite=0)
+V79=NeweyWest(lm(d79~x1-1),lag=m,prewhite=0)
+
+V89=NeweyWest(lm(d89~x1-1),lag=m,prewhite=0)
+
+
+DM=matrix(0,nrow=9,ncol=9)
+# loss = modello in riga meno modello in colonna
+colnames(DM)=c("GARCH std","GARCH ged","eGARCH norm","eGARCH std", 
+                "eGARCH ged","gjrGARCH norm", "gjrGARCH std","gjrGARCH ged", "apARCH")
+rownames(DM)=c("GARCH norm", "GARCH std","GARCH ged","eGARCH norm","eGARCH std", 
+                "eGARCH ged","gjrGARCH norm", "gjrGARCH std", "gjrGARCH ged")
+DM[1,1]<-mean(d01)/sqrt(V01)
+DM[1,2]<-mean(d02)/sqrt(V02)
+DM[1,3]<-mean(d03)/sqrt(V03)
+DM[1,4]<-mean(d04)/sqrt(V04)
+DM[1,5]<-mean(d05)/sqrt(V05)
+DM[1,6]<-mean(d06)/sqrt(V06)
+DM[1,7]<-mean(d07)/sqrt(V07)
+DM[1,8]<-mean(d08)/sqrt(V08)
+DM[1,9]<-mean(d09)/sqrt(V09)
+
+DM[2,2]<-mean(d12)/sqrt(V12)
+DM[2,3]<-mean(d13)/sqrt(V13)
+DM[2,4]<-mean(d14)/sqrt(V14)
+DM[2,5]<-mean(d15)/sqrt(V15)
+DM[2,6]<-mean(d16)/sqrt(V16)
+DM[2,7]<-mean(d17)/sqrt(V17)
+DM[2,8]<-mean(d18)/sqrt(V18)
+DM[2,9]<-mean(d19)/sqrt(V19)
+
+DM[3,3]<-mean(d23)/sqrt(V23)
+DM[3,4]<-mean(d24)/sqrt(V24)
+DM[3,5]<-mean(d25)/sqrt(V25)
+DM[3,6]<-mean(d26)/sqrt(V26)
+DM[3,7]<-mean(d27)/sqrt(V27)
+DM[3,8]<-mean(d28)/sqrt(V28)
+DM[3,9]<-mean(d29)/sqrt(V29)
+
+DM[4,4]<-mean(d34)/sqrt(V24)
+DM[4,5]<-mean(d35)/sqrt(V25)
+DM[4,6]<-mean(d36)/sqrt(V26)
+DM[4,7]<-mean(d37)/sqrt(V27)
+DM[4,8]<-mean(d38)/sqrt(V28)
+DM[4,9]<-mean(d39)/sqrt(V39)
+
+DM[5,5]<-mean(d45)/sqrt(V45)
+DM[5,6]<-mean(d46)/sqrt(V46)
+DM[5,7]<-mean(d47)/sqrt(V47)
+DM[5,8]<-mean(d48)/sqrt(V48)
+DM[5,9]<-mean(d49)/sqrt(V49)
+
+DM[6,6]<-mean(d56)/sqrt(V56)
+DM[6,7]<-mean(d57)/sqrt(V57)
+DM[6,8]<-mean(d58)/sqrt(V58)
+DM[6,9]<-mean(d59)/sqrt(V59)
+
+DM[7,7]<-mean(d67)/sqrt(V67)
+DM[7,8]<-mean(d68)/sqrt(V68)
+DM[7,9]<-mean(d69)/sqrt(V69)
+
+DM[8,8]<-mean(d78)/sqrt(V78)
+DM[8,9]<-mean(d79)/sqrt(V79)
+
+DM[9,9]<-mean(d89)/sqrt(V89)
+
+show(DM)
+
+```
+Il test porta a risultati significativi nel caso in cui i valori siano maggiori di 1.96. Il miglior modello per previsioni sembra essere il Garch con distribuzione ged.
+
