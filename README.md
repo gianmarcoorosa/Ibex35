@@ -1,6 +1,6 @@
 # Ibex35 Analysis
 
-This repository contains the code for a project completed as part of the course **Statistical Methods for Finance** during my bachelor's degree. The task was to identify the best GARCH model based on information criteria and prediction capability for the Ibex 35 total return index.
+This repository contains the code for a project completed as part of the course **Statistical Methods for Finance** during my bachelor's degree. The task was to identify the best GARCH model based on information criteria and prediction capability for the Ibex 35 total return index. The pdf contains also some analysis related to other products.
 
 ## Project Overview
 
